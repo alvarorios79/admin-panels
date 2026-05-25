@@ -680,9 +680,19 @@ function doLogin() {
   btn.textContent = 'Entrando...';
   auth.signInWithEmailAndPassword(email, password)
     .catch(err => {
-      errEl.textContent = 'Correo o contraseña incorrectos';
+      const msgs = {
+        'auth/wrong-password':         'Contraseña incorrecta',
+        'auth/user-not-found':         'No existe cuenta con ese correo',
+        'auth/invalid-email':          'Correo inválido',
+        'auth/user-disabled':          'Cuenta deshabilitada',
+        'auth/too-many-requests':      'Demasiados intentos. Espera unos minutos',
+        'auth/unauthorized-domain':    'Dominio no autorizado en Firebase',
+        'auth/invalid-credential':     'Credenciales inválidas',
+        'auth/network-request-failed': 'Error de red',
+      };
+      errEl.textContent = msgs[err.code] || ('Error ' + err.code);
       btn.disabled = false;
-      btn.textContent = 'Iniciar sesión';
+      btn.textContent = 'Iniciar sesión →';
     });
 }
 
