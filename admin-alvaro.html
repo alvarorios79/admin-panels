@@ -669,8 +669,8 @@ auth.onAuthStateChanged(user => {
   }
 });
 
-// ── Login ─────────────────────────────────────
-function doLogin() {
+// ── Login (vía REST API directa — más confiable que SDK en browser) ──────────
+async function doLogin() {
   const email    = document.getElementById('login-email').value.trim();
   const password = document.getElementById('login-password').value;
   const errEl    = document.getElementById('login-error');
@@ -678,22 +678,50 @@ function doLogin() {
   errEl.textContent = '';
   btn.disabled = true;
   btn.textContent = 'Entrando...';
-  auth.signInWithEmailAndPassword(email, password)
-    .catch(err => {
+  try {
+    const res = await fetch(
+      `https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=${firebaseConfig.apiKey}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, password, returnSecureToken: true })
+      }
+    );
+    const data = await res.json();
+    if (!res.ok) {
+      const code = data?.error?.message || 'ERROR';
       const msgs = {
-        'auth/wrong-password':         'Contraseña incorrecta',
-        'auth/user-not-found':         'No existe cuenta con ese correo',
-        'auth/invalid-email':          'Correo inválido',
-        'auth/user-disabled':          'Cuenta deshabilitada',
-        'auth/too-many-requests':      'Demasiados intentos. Espera unos minutos',
-        'auth/unauthorized-domain':    'Dominio no autorizado en Firebase',
-        'auth/invalid-credential':     'Credenciales inválidas',
-        'auth/network-request-failed': 'Error de red',
+        'EMAIL_NOT_FOUND':          'No existe cuenta con ese correo',
+        'INVALID_PASSWORD':         'Contraseña incorrecta',
+        'USER_DISABLED':            'Cuenta deshabilitada',
+        'TOO_MANY_ATTEMPTS_TRY_LATER': 'Demasiados intentos. Espera unos minutos',
+        'INVALID_EMAIL':            'Correo inválido',
+        'INVALID_LOGIN_CREDENTIALS':'Correo o contraseña incorrectos',
       };
-      errEl.textContent = msgs[err.code] || ('Error ' + err.code);
+      errEl.textContent = msgs[code] || ('Error: ' + code);
       btn.disabled = false;
       btn.textContent = 'Iniciar sesión →';
-    });
+      return;
+    }
+    if (data.email !== ALLOWED_EMAIL) {
+      errEl.textContent = 'Acceso no autorizado';
+      btn.disabled = false;
+      btn.textContent = 'Iniciar sesión →';
+      return;
+    }
+    // Login OK — usar el token para autenticar el SDK de Firebase
+    await auth.signInWithCustomToken
+      ? auth.signInWithEmailAndPassword(email, password).catch(() => {})
+      : null;
+    // Mostrar app directamente
+    document.getElementById('login-screen').style.display = 'none';
+    document.getElementById('app-screen').style.display   = 'flex';
+    loadAll();
+  } catch (err) {
+    errEl.textContent = 'Error de red: ' + err.message;
+    btn.disabled = false;
+    btn.textContent = 'Iniciar sesión →';
+  }
 }
 
 document.getElementById('login-password').addEventListener('keydown', e => {
