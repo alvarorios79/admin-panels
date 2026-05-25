@@ -633,39 +633,98 @@ const firebaseConfig = {
 
 // ── Init ──────────────────────────────────────
 firebase.initializeApp(firebaseConfig);
-const auth = firebase.auth();
-const db   = firebase.firestore();
-
-// ── Auth State ────────────────────────────────
 const ALLOWED_EMAIL = 'joanfgv@gmail.com';
+const FS_BASE = `https://firestore.googleapis.com/v1/projects/${firebaseConfig.projectId}/databases/(default)/documents`;
+let _idToken = null;
 
-auth.onAuthStateChanged(user => {
-  if (user && user.email === ALLOWED_EMAIL) {
-    document.getElementById('login-screen').style.display = 'none';
-    document.getElementById('app-screen').style.display   = 'flex';
-    loadAll();
-  } else {
-    if (user) auth.signOut();
-    document.getElementById('login-screen').style.display = 'flex';
-    document.getElementById('app-screen').style.display   = 'none';
+// ── Firestore REST helpers ────────────────────
+function fsHeaders() {
+  return { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + _idToken };
+}
+function toFsValue(v) {
+  if (v === null || v === undefined) return { nullValue: null };
+  if (typeof v === 'boolean') return { booleanValue: v };
+  if (typeof v === 'number')  return { integerValue: String(v) };
+  return { stringValue: String(v) };
+}
+function fromFsDoc(doc) {
+  const id  = doc.name.split('/').pop();
+  const obj = { id };
+  for (const [k, fv] of Object.entries(doc.fields || {})) {
+    obj[k] = fv.stringValue ?? fv.integerValue ?? fv.booleanValue ?? fv.timestampValue ?? null;
   }
-});
+  return obj;
+}
+async function fsGet(col) {
+  const r = await fetch(`${FS_BASE}/${col}`, { headers: fsHeaders() });
+  const j = await r.json();
+  return (j.documents || []).map(fromFsDoc);
+}
+async function fsAdd(col, docData) {
+  const fields = {};
+  for (const [k, v] of Object.entries(docData)) fields[k] = toFsValue(v);
+  fields.createdAt = { timestampValue: new Date().toISOString() };
+  fields.updatedAt = { timestampValue: new Date().toISOString() };
+  const r = await fetch(`${FS_BASE}/${col}`, {
+    method: 'POST', headers: fsHeaders(),
+    body: JSON.stringify({ fields })
+  });
+  if (!r.ok) throw new Error(await r.text());
+}
+async function fsUpdate(col, id, docData) {
+  const fields = {};
+  for (const [k, v] of Object.entries(docData)) fields[k] = toFsValue(v);
+  fields.updatedAt = { timestampValue: new Date().toISOString() };
+  const r = await fetch(`${FS_BASE}/${col}/${id}`, {
+    method: 'PATCH', headers: fsHeaders(),
+    body: JSON.stringify({ fields })
+  });
+  if (!r.ok) throw new Error(await r.text());
+}
+async function fsDelete(col, id) {
+  const r = await fetch(`${FS_BASE}/${col}/${id}`, { method: 'DELETE', headers: fsHeaders() });
+  if (!r.ok) throw new Error(await r.text());
+}
 
 // ── Login ─────────────────────────────────────
-function doLogin() {
-  const email    = document.getElementById('login-email').value.trim();
+async function doLogin() {
+  const email    = 'joanfgv@gmail.com';
   const password = document.getElementById('login-password').value;
   const errEl    = document.getElementById('login-error');
   const btn      = document.getElementById('login-btn');
   errEl.textContent = '';
   btn.disabled = true;
   btn.textContent = 'Entrando...';
-  auth.signInWithEmailAndPassword(email, password)
-    .catch(err => {
-      errEl.textContent = 'Correo o contraseña incorrectos';
+  try {
+    const res = await fetch(
+      `https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=${firebaseConfig.apiKey}`,
+      { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, password, returnSecureToken: true }) }
+    );
+    const result = await res.json();
+    if (!res.ok) {
+      const code = result?.error?.message || 'ERROR';
+      const msgs = {
+        'EMAIL_NOT_FOUND':             'No existe esa cuenta',
+        'INVALID_PASSWORD':            'Contraseña incorrecta',
+        'INVALID_LOGIN_CREDENTIALS':   'Contraseña incorrecta',
+        'USER_DISABLED':               'Cuenta deshabilitada',
+        'TOO_MANY_ATTEMPTS_TRY_LATER': 'Demasiados intentos. Espera unos minutos',
+      };
+      errEl.textContent = msgs[code] || ('Error: ' + code);
       btn.disabled = false;
-      btn.textContent = 'Iniciar sesión';
-    });
+      btn.textContent = 'Iniciar sesión →';
+      return;
+    }
+    _idToken = result.idToken;
+    document.getElementById('login-screen').style.display = 'none';
+    document.getElementById('app-screen').style.display   = 'flex';
+    loadAll();
+  } catch (err) {
+    errEl.textContent = 'Error de red: ' + err.message;
+    btn.disabled = false;
+    btn.textContent = 'Iniciar sesión →';
+  }
 }
 
 document.getElementById('login-password').addEventListener('keydown', e => {
@@ -673,7 +732,10 @@ document.getElementById('login-password').addEventListener('keydown', e => {
 });
 
 function doLogout() {
-  auth.signOut();
+  _idToken = null;
+  document.getElementById('login-screen').style.display = 'flex';
+  document.getElementById('app-screen').style.display   = 'none';
+  document.getElementById('login-password').value = '';
 }
 
 // ── Navigation ────────────────────────────────
@@ -702,17 +764,19 @@ const data = { noticias: [], conciertos: [], medios: [], promos: [] };
 let editingId   = null;
 let editingType = null;
 
-// ── Load all collections ──────────────────────
-function loadAll() {
-  ['noticias', 'conciertos', 'medios', 'promos'].forEach(col => {
-    db.collection(col).orderBy('createdAt', 'desc').onSnapshot(snap => {
-      data[col] = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+// ── Load all collections via REST ─────────────
+async function loadAll() {
+  for (const col of ['noticias', 'conciertos', 'medios', 'promos']) {
+    document.getElementById('list-' + col).innerHTML =
+      '<div class="loading"><div class="spinner"></div><br>Cargando...</div>';
+    try {
+      data[col] = await fsGet(col);
       renderList(col);
-    }, err => {
-      console.error(col, err);
-      document.getElementById('list-' + col).innerHTML = '<div class="empty-state"><div class="emoji">⚠️</div><p>Error cargando datos. Verifica la configuración de Firebase.</p></div>';
-    });
-  });
+    } catch (e) {
+      document.getElementById('list-' + col).innerHTML =
+        `<div class="empty-state"><div class="emoji">⚠️</div><p>Error: ${e.message}</p></div>`;
+    }
+  }
 }
 
 // ── Render lists ──────────────────────────────
@@ -838,25 +902,21 @@ async function saveItem() {
   const btn = document.getElementById('modal-save-btn');
   btn.disabled = true;
   btn.textContent = 'Guardando...';
-
   try {
-    const col  = editingType;
+    const col     = editingType;
     const docData = collectFormData(col);
     if (!docData) { btn.disabled = false; btn.textContent = 'Guardar'; return; }
-
-    docData.updatedAt = firebase.firestore.FieldValue.serverTimestamp();
-    if (!editingId) docData.createdAt = firebase.firestore.FieldValue.serverTimestamp();
-
     if (editingId) {
-      await db.collection(col).doc(editingId).update(docData);
+      await fsUpdate(col, editingId, docData);
       showToast('Actualizado correctamente');
     } else {
-      await db.collection(col).add(docData);
+      await fsAdd(col, docData);
       showToast('Creado correctamente');
     }
     closeModal();
+    data[col] = await fsGet(col);
+    renderList(col);
   } catch (err) {
-    console.error(err);
     showToast('Error al guardar: ' + err.message, 'error');
   } finally {
     btn.disabled = false;
@@ -890,10 +950,12 @@ function collectFormData(col) {
 async function deleteItem(col, id) {
   if (!confirm('¿Eliminar este elemento? Esta acción no se puede deshacer.')) return;
   try {
-    await db.collection(col).doc(id).delete();
+    await fsDelete(col, id);
     showToast('Eliminado correctamente');
+    data[col] = await fsGet(col);
+    renderList(col);
   } catch (err) {
-    showToast('Error al eliminar', 'error');
+    showToast('Error al eliminar: ' + err.message, 'error');
   }
 }
 
@@ -914,8 +976,8 @@ function showTab(tab) {
 
 async function loadTokens() {
   try {
-    const snap = await db.collection('push_tokens').get();
-    cachedTokens = snap.docs.map(d => d.data().token).filter(Boolean);
+    const docs = await fsGet('push_tokens');
+    cachedTokens = docs.map(d => d.token).filter(Boolean);
     document.getElementById('token-count').textContent = cachedTokens.length;
   } catch {
     document.getElementById('token-count').textContent = '—';
@@ -925,17 +987,16 @@ async function loadTokens() {
 async function loadNotifHistory() {
   const el = document.getElementById('notif-history');
   try {
-    const snap = await db.collection('notif_history').orderBy('sentAt', 'desc').limit(10).get();
-    if (snap.empty) {
+    const docs = await fsGet('notif_history');
+    if (!docs.length) {
       el.innerHTML = '<div style="color:var(--muted);font-size:13px;">Aún no has enviado notificaciones.</div>';
       return;
     }
-    el.innerHTML = snap.docs.map(d => {
-      const h = d.data();
-      const date = h.sentAt?.toDate?.()?.toLocaleDateString('es-CO', { day:'2-digit', month:'short', year:'numeric', hour:'2-digit', minute:'2-digit' }) ?? '—';
+    el.innerHTML = docs.slice(0,10).map(h => {
+      const date = h.sentAt ? new Date(h.sentAt).toLocaleDateString('es-CO', { day:'2-digit', month:'short', year:'numeric' }) : '—';
       return `<div style="border-bottom:1px solid var(--border);padding:12px 0;">
-        <div style="font-weight:700;font-size:14px;margin-bottom:2px;">${esc(h.title)}</div>
-        <div style="color:var(--muted);font-size:13px;margin-bottom:4px;">${esc(h.body)}</div>
+        <div style="font-weight:700;font-size:14px;margin-bottom:2px;">${esc(h.title||'')}</div>
+        <div style="color:var(--muted);font-size:13px;margin-bottom:4px;">${esc(h.body||'')}</div>
         <div style="color:var(--primary);font-size:11px;font-weight:600;">📱 ${h.sent ?? 0} enviadas · 📅 ${date}</div>
       </div>`;
     }).join('');
@@ -999,10 +1060,7 @@ async function sendPushNotification() {
       totalSent += data.filter(r => r.status === 'ok').length;
       errors    += data.filter(r => r.status !== 'ok').length;
     }
-    await db.collection('notif_history').add({
-      title, body, sent: totalSent, errors,
-      sentAt: firebase.firestore.FieldValue.serverTimestamp(),
-    });
+    await fsAdd('notif_history', { title, body, sent: totalSent, errors, sentAt: new Date().toISOString() });
     resEl.className = 'send-result ok';
     resEl.textContent = `✓ Enviado a ${totalSent} fans${errors > 0 ? ` (${errors} fallidas)` : ''}`;
     showToast(`Notificación enviada a ${totalSent} fans`);
