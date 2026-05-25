@@ -709,14 +709,16 @@ async function doLogin() {
       btn.textContent = 'Iniciar sesión →';
       return;
     }
-    // Login OK — usar el token para autenticar el SDK de Firebase
-    await auth.signInWithCustomToken
-      ? auth.signInWithEmailAndPassword(email, password).catch(() => {})
-      : null;
-    // Mostrar app directamente
-    document.getElementById('login-screen').style.display = 'none';
-    document.getElementById('app-screen').style.display   = 'flex';
-    loadAll();
+    // Login OK — autenticar SDK de Firebase para que Firestore funcione
+    try {
+      await auth.signInWithEmailAndPassword(email, password);
+      // onAuthStateChanged se encarga de mostrar la app y llamar loadAll()
+    } catch (sdkErr) {
+      // Si el SDK falla igual, mostramos la app y cargamos con el token REST
+      document.getElementById('login-screen').style.display = 'none';
+      document.getElementById('app-screen').style.display   = 'flex';
+      loadAllWithToken(data.idToken);
+    }
   } catch (err) {
     errEl.textContent = 'Error de red: ' + err.message;
     btn.disabled = false;
@@ -757,6 +759,32 @@ function showToast(msg, type = 'success') {
 const data = { noticias: [], conciertos: [], medios: [], promos: [] };
 let editingId   = null;
 let editingType = null;
+
+// ── Load all via Firestore REST API (fallback cuando SDK no autenticado) ──────
+async function loadAllWithToken(idToken) {
+  const base = `https://firestore.googleapis.com/v1/projects/${firebaseConfig.projectId}/databases/(default)/documents`;
+  const headers = { 'Authorization': 'Bearer ' + idToken };
+  for (const col of ['noticias', 'conciertos', 'medios', 'promos']) {
+    try {
+      const res  = await fetch(`${base}/${col}?orderBy=createdAt desc`, { headers });
+      const json = await res.json();
+      const docs = json.documents || [];
+      data[col]  = docs.map(d => {
+        const id     = d.name.split('/').pop();
+        const fields = d.fields || {};
+        const obj    = { id };
+        for (const [k, v] of Object.entries(fields)) {
+          obj[k] = v.stringValue ?? v.integerValue ?? v.booleanValue ?? v.timestampValue ?? null;
+        }
+        return obj;
+      });
+      renderList(col);
+    } catch (e) {
+      document.getElementById('list-' + col).innerHTML =
+        '<div class="empty-state"><div class="emoji">⚠️</div><p>Error cargando datos.</p></div>';
+    }
+  }
+}
 
 // ── Load all collections ──────────────────────
 function loadAll() {
